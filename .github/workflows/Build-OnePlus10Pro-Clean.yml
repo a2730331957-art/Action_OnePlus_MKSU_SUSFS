@@ -1,0 +1,103 @@
+name: Build clean OnePlus 10 Pro kernel for official KernelSU LKM
+'on':
+  workflow_dispatch: {}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Maximize build space
+      uses: easimon/maximize-build-space@master
+      with:
+        root-reserve-mb: 8192
+        temp-reserve-mb: 2048
+        swap-size-mb: 8192
+        remove-dotnet: 'true'
+        remove-android: 'true'
+        remove-haskell: 'true'
+        remove-codeql: 'true'
+    - name: Configure Git
+      run: 'git config --global user.name "Numbersf"
+
+        git config --global user.email "263623064@qq.com"
+
+        '
+    - name: Install dependencies
+      run: 'sudo apt update && sudo apt upgrade -y
+
+        sudo apt install -y python3 git curl
+
+        '
+    - name: Install repo tool
+      run: 'curl https://storage.googleapis.com/git-repo-downloads/repo > ~/repo
+
+        chmod a+x ~/repo
+
+        sudo mv ~/repo /usr/local/bin/repo
+
+        '
+    - name: Initialize repo and sync
+      run: 'mkdir kernel_workspace && cd kernel_workspace
+
+        repo init -u https://github.com/OnePlusOSS/kernel_manifest.git -b refs/heads/oneplus/sm8450
+        -m oneplus_10_pro_v.xml --depth=1
+
+        repo sync
+
+        if [  -e kernel_platform/common/BUILD.bazel ]; then
+
+        sed -i ''/^[[:space:]]*"protected_exports_list"[[:space:]]*:[[:space:]]*"android\/abi_gki_protected_exports_aarch64",$/d''
+        kernel_platform/common/BUILD.bazel
+
+        fi
+
+        if [  -e kernel_platform/msm-kernel/BUILD.bazel ]; then
+
+        sed -i ''/^[[:space:]]*"protected_exports_list"[[:space:]]*:[[:space:]]*"android\/abi_gki_protected_exports_aarch64",$/d''
+        kernel_platform/msm-kernel/BUILD.bazel
+
+        fi
+
+        rm kernel_platform/common/android/abi_gki_protected_exports_* || echo "No
+        protected exports!"
+
+        rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo
+        "No protected exports!"
+
+        '
+    - name: Force remove -dirty suffix
+      run: 'cd kernel_workspace/kernel_platform
+
+        sed -i ''s/ -dirty//g'' common/scripts/setlocalversion
+
+        sed -i ''s/ -dirty//g'' msm-kernel/scripts/setlocalversion
+
+        sed -i ''s/ -dirty//g'' external/dtc/scripts/setlocalversion
+
+        sed -i ''$i res=$(echo "$res" | sed ''\''''s/-dirty//g''\'''')'' common/scripts/setlocalversion
+
+        git add -A
+
+        git commit -m "Force remove -dirty suffix from kernel version"
+
+        '
+    - name: Fallback build kernel
+      run: "cd kernel_workspace\npython3 - <<'PY'\nfrom pathlib import Path\nscript\
+        \ = Path(\"kernel_platform/oplus/build/oplus_build_kernel.sh\")\nsource =\
+        \ script.read_text()\nmarker = \"    build_end_time\"\nif source.count(marker)\
+        \ != 1:\n    raise SystemExit(\"Expected one build_end_time call; inspect\
+        \ vendor build script\")\nsource = source.replace(marker, '    local build_status=${PIPESTATUS[0]}\\\
+        n    if [ \"$build_status\" -ne 0 ]; then\\n        return \"$build_status\"\
+        \\n    fi\\n' + marker, 1)\nscript.write_text(source)\nPY\nLTO=thin SYSTEM_DLKM_RE_SIGN=0\
+        \ BUILD_SYSTEM_DLKM=0 KMI_SYMBOL_LIST_STRICT_MODE=0 ./kernel_platform/oplus/build/oplus_build_kernel.sh\
+        \ waipio gki\n"
+    - name: Verify kernel Image
+      run: "image_path=$(find kernel_workspace/kernel_platform -type f -name Image\
+        \ -size +0c -print -quit)\nif [ -z \"$image_path\" ]; then\n  echo \"::error::Kernel\
+        \ build produced no non-empty Image\"\n  exit 1\nfi\necho \"Built Image: $image_path\"\
+        \nfile \"$image_path\"\nsha256sum \"$image_path\"\n"
+    - name: Upload clean OnePlus kernel
+      uses: actions/upload-artifact@v4
+      with:
+        name: OnePlus10Pro_H87_clean_kernel
+        path: kernel_workspace/kernel_platform/out/msm-waipio-waipio-gki/dist/Image
+        if-no-files-found: error
