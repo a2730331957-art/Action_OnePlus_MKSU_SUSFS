@@ -186,6 +186,9 @@ jobs:
           cd kernel_workspace/kernel_platform
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
           cd ./KernelSU
+          if [ "${{ github.event.inputs.FEIL }}" = "oneplus_10_pro_v" ]; then
+            git checkout e2912817f4e1b194e582a06e0b5eacf6a3fb7083
+          fi
           KSU_VERSION=$(expr $(/usr/bin/git rev-list --count main) "+" 10606)
           echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
           export KSU_VERSION=$KSU_VERSION
@@ -195,6 +198,9 @@ jobs:
         run: |
           cd kernel_workspace
           git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}
+          if [ "${{ github.event.inputs.FEIL }}" = "oneplus_10_pro_v" ]; then
+            git -C susfs4ksu checkout 789702ef7dab3fcfc9b3575c049650377ec944a1
+          fi
           git clone https://github.com/ShirkNeko/SukiSU_patch.git
           cd kernel_platform
           echo "正在给内核打susfs补丁"
@@ -272,6 +278,53 @@ jobs:
           if "static int kernel_umount_feature_set(u64 value)" not in source:
               source = source.replace(marker, setter + marker, 1)
           kernel_umount.write_text(source)
+          PY
+
+      - name: Align SUSFS hooks with SukiSU builtin ABI
+        if: ${{ github.event.inputs.FEIL == 'oneplus_10_pro_v' }}
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          platform = Path("kernel_workspace/kernel_platform")
+          driver = (platform / "KernelSU/kernel/feature/sucompat.c").read_text()
+          if "bool ksu_su_compat_enabled __read_mostly = true;" not in driver:
+              raise SystemExit("Unexpected builtin sucompat ABI; review the adapter")
+          if "ksu_handle_post_execveat_sucompat" in driver:
+              raise SystemExit("Builtin now has a post-exec hook; review the adapter")
+
+          # Builtin stores this switch as bool, not upstream KernelSU's static key.
+          for name in ("exec.c", "open.c", "stat.c"):
+              path = platform / "common/fs" / name
+              source = path.read_text()
+              old = "extern struct static_key_true ksu_su_compat_enabled;"
+              check = "static_branch_likely(&ksu_su_compat_enabled)"
+              if source.count(old) != 1 or source.count(check) != 1:
+                  raise SystemExit(f"Unexpected sucompat switch in {name}")
+              source = source.replace(old, "extern bool ksu_su_compat_enabled;")
+              source = source.replace(check, "READ_ONCE(ksu_su_compat_enabled)")
+
+              if name == "exec.c":
+                  # The pinned builtin uses its existing ioctl permission model.
+                  # It has no upstream scoped su-session FD or post-exec hook.
+                  # Restore the pre-exec-only calling contract; do not stub a
+                  # capability installer or interpret builtin's zero as a session.
+                  patterns = (
+                      r"extern int ksu_handle_post_execveat_sucompat\([^;]+;\n",
+                      r"#ifdef CONFIG_KSU_SUSFS\n\tbool is_su_session = false;\n#endif // #ifdef CONFIG_KSU_SUSFS\n",
+                      r"#ifdef CONFIG_KSU_SUSFS\n\tif \(unlikely\(is_su_session\)\)\n\t\t\(void\)ksu_handle_post_execveat_sucompat\([^;]+;\n#endif // #ifdef CONFIG_KSU_SUSFS\n",
+                  )
+                  for pattern in patterns:
+                      source, count = re.subn(pattern, "", source)
+                      if count != 1:
+                          raise SystemExit("Unexpected upstream post-exec hook layout")
+                  if source.count("is_su_session = !ksu_handle_execveat") != 2:
+                      raise SystemExit("Unexpected pre-exec hook layout")
+                  source = source.replace("is_su_session = !ksu_handle_execveat", "(void)ksu_handle_execveat")
+                  if "is_su_session" in source or "ksu_handle_post_execveat_sucompat" in source:
+                      raise SystemExit("Unadapted upstream session hooks remain")
+              path.write_text(source)
           PY
 
       - name: Apply LZ4KD
