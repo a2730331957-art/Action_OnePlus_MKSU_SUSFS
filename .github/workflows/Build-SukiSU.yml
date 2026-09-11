@@ -221,21 +221,48 @@ jobs:
           echo "正在打隐藏应用补丁"
           patch -p1 -F 3 < 69_hide_stuff.patch
 
-      # 69_hide_stuff.patch only assigns dentry inside the file-backed VMA path.
-      # Android 12 / 5.10 can also reach the shared tail through the SUSFS path,
-      # so Clang correctly rejects the possibly-uninitialized pointer.
-      - name: Fix Android 12 task_mmu dentry initialization
+      # Fix current upstream builtin/SUSFS patches for the Android 12 / 5.10
+      # source tree used by the OnePlus 10 Pro.
+      - name: Fix Android 12 5.10 source compatibility
         if: ${{ github.event.inputs.ANDROID_VERSION == 'android12' && github.event.inputs.KERNEL_VERSION == '5.10' }}
         run: |
           python3 - <<'PY'
           from pathlib import Path
 
-          path = Path("kernel_workspace/kernel_platform/common/fs/proc/task_mmu.c")
-          source = path.read_text()
+          task_mmu = Path("kernel_workspace/kernel_platform/common/fs/proc/task_mmu.c")
+          source = task_mmu.read_text()
           old = "struct dentry *dentry;"
           if source.count(old) != 1:
-              raise SystemExit(f"Expected exactly one uninitialized dentry declaration, found {source.count(old)}")
-          path.write_text(source.replace(old, "struct dentry *dentry = NULL;", 1))
+              raise SystemExit(f"Expected one uninitialized dentry declaration, found {source.count(old)}")
+          task_mmu.write_text(source.replace(old, "struct dentry *dentry = NULL;", 1))
+
+          statfs = Path("kernel_workspace/kernel_platform/common/fs/statfs.c")
+          source = statfs.read_text()
+          marker = "static int susfs_statfs_by_dentry(struct dentry *dentry, struct kstatfs *buf, bool *is_fuse)"
+          prototype = "extern int susfs_sus_kstat_spoof_vfs_statfs(struct inode *inode, struct kstatfs *buf, bool *is_fuse);\n"
+          if source.count(marker) != 1:
+              raise SystemExit(f"Expected one SUSFS statfs helper, found {source.count(marker)}")
+          if prototype + marker not in source:
+              source = source.replace(marker, prototype + marker, 1)
+          statfs.write_text(source)
+
+          kernel_umount = Path("kernel_workspace/kernel_platform/KernelSU/kernel/feature/kernel_umount.c")
+          source = kernel_umount.read_text()
+          marker = "static const struct ksu_feature_handler kernel_umount_handler = {"
+          setter = """static int kernel_umount_feature_set(u64 value)
+          {
+              bool enable = value != 0;
+              ksu_kernel_umount_enabled = enable;
+              pr_info(\"kernel_umount: set to %d\\n\", enable);
+              return 0;
+          }
+
+          """
+          if source.count(marker) != 1:
+              raise SystemExit(f"Expected one kernel_umount handler, found {source.count(marker)}")
+          if "static int kernel_umount_feature_set(u64 value)" not in source:
+              source = source.replace(marker, setter + marker, 1)
+          kernel_umount.write_text(source)
           PY
 
       - name: Apply LZ4KD
