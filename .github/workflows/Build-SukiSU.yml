@@ -229,6 +229,15 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
 
+          susfs = Path("kernel_workspace/kernel_platform/common/fs/susfs.c")
+          source = susfs.read_text()
+          if "#include <linux/security.h>" not in source:
+              marker = "#include <linux/fs.h>"
+              if source.count(marker) != 1:
+                  raise SystemExit("Expected one linux/fs.h include in susfs.c")
+              source = source.replace(marker, marker + "\n#include <linux/security.h>", 1)
+          susfs.write_text(source)
+
           task_mmu = Path("kernel_workspace/kernel_platform/common/fs/proc/task_mmu.c")
           source = task_mmu.read_text()
           old = "struct dentry *dentry;"
@@ -368,7 +377,28 @@ jobs:
         if: ${{ github.event.inputs.CPU != 'sm8650' && github.event.inputs.CPU != 'sm7675' }}
         run: |
          cd kernel_workspace
+         python3 - <<'PY'
+         from pathlib import Path
+         script = Path("kernel_platform/oplus/build/oplus_build_kernel.sh")
+         source = script.read_text()
+         marker = "    build_end_time"
+         if source.count(marker) != 1:
+             raise SystemExit("Expected one build_end_time call; inspect vendor build script")
+         source = source.replace(marker, '    local build_status=${PIPESTATUS[0]}\n    if [ "$build_status" -ne 0 ]; then\n        return "$build_status"\n    fi\n' + marker, 1)
+         script.write_text(source)
+         PY
          LTO=thin SYSTEM_DLKM_RE_SIGN=0 BUILD_SYSTEM_DLKM=0 KMI_SYMBOL_LIST_STRICT_MODE=0 ./kernel_platform/oplus/build/oplus_build_kernel.sh ${{ github.event.inputs.CPUD }} ${{ github.event.inputs.BUILD_METHOD }}
+
+      - name: Verify kernel Image
+        run: |
+          image_path=$(find kernel_workspace/kernel_platform -type f -name Image -size +0c -print -quit)
+          if [ -z "$image_path" ]; then
+            echo "::error::Kernel build produced no non-empty Image"
+            exit 1
+          fi
+          echo "Built Image: $image_path"
+          file "$image_path"
+          sha256sum "$image_path"
 
       - name: Make AnyKernel3
         run: |
