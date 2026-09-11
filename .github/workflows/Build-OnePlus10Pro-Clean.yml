@@ -16,85 +16,78 @@ jobs:
         remove-haskell: 'true'
         remove-codeql: 'true'
     - name: Configure Git
-      run: 'git config --global user.name "Numbersf"
-
+      run: |
+        git config --global user.name "Numbersf"
         git config --global user.email "263623064@qq.com"
-
-        '
     - name: Install dependencies
-      run: 'sudo apt update && sudo apt upgrade -y
-
-        sudo apt install -y python3 git curl
-
-        '
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y python3 git curl
     - name: Install repo tool
-      run: 'curl https://storage.googleapis.com/git-repo-downloads/repo > ~/repo
-
+      run: |
+        curl https://storage.googleapis.com/git-repo-downloads/repo > ~/repo
         chmod a+x ~/repo
-
         sudo mv ~/repo /usr/local/bin/repo
-
-        '
     - name: Initialize repo and sync
-      run: 'mkdir kernel_workspace && cd kernel_workspace
-
-        repo init -u https://github.com/OnePlusOSS/kernel_manifest.git -b refs/heads/oneplus/sm8450
-        -m oneplus_10_pro_v.xml --depth=1
-
-        repo sync
-
+      run: |
+        mkdir kernel_workspace && cd kernel_workspace
+        repo init -u https://github.com/OnePlusOSS/kernel_manifest.git -b refs/heads/oneplus/sm8450 -m oneplus_10_pro_v.xml --depth=1
+        git config --global http.lowSpeedLimit 1024
+        git config --global http.lowSpeedTime 120
+        synced=false
+        for attempt in 1 2 3; do
+          echo "Source sync attempt $attempt/3"
+          if timeout 12m repo sync -c --no-tags --no-clone-bundle -j4 --retry-fetches=2 --fail-fast; then
+            synced=true
+            break
+          fi
+          sleep 15
+        done
+        if [ "$synced" != true ]; then
+          echo "::error::Source download failed after three bounded attempts"
+          exit 1
+        fi
         if [  -e kernel_platform/common/BUILD.bazel ]; then
-
-        sed -i ''/^[[:space:]]*"protected_exports_list"[[:space:]]*:[[:space:]]*"android\/abi_gki_protected_exports_aarch64",$/d''
-        kernel_platform/common/BUILD.bazel
-
+        sed -i '/^[[:space:]]*"protected_exports_list"[[:space:]]*:[[:space:]]*"android\/abi_gki_protected_exports_aarch64",$/d' kernel_platform/common/BUILD.bazel
         fi
-
         if [  -e kernel_platform/msm-kernel/BUILD.bazel ]; then
-
-        sed -i ''/^[[:space:]]*"protected_exports_list"[[:space:]]*:[[:space:]]*"android\/abi_gki_protected_exports_aarch64",$/d''
-        kernel_platform/msm-kernel/BUILD.bazel
-
+        sed -i '/^[[:space:]]*"protected_exports_list"[[:space:]]*:[[:space:]]*"android\/abi_gki_protected_exports_aarch64",$/d' kernel_platform/msm-kernel/BUILD.bazel
         fi
-
-        rm kernel_platform/common/android/abi_gki_protected_exports_* || echo "No
-        protected exports!"
-
-        rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo
-        "No protected exports!"
-
-        '
+        rm kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
+        rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
     - name: Force remove -dirty suffix
-      run: 'cd kernel_workspace/kernel_platform
-
-        sed -i ''s/ -dirty//g'' common/scripts/setlocalversion
-
-        sed -i ''s/ -dirty//g'' msm-kernel/scripts/setlocalversion
-
-        sed -i ''s/ -dirty//g'' external/dtc/scripts/setlocalversion
-
-        sed -i ''$i res=$(echo "$res" | sed ''\''''s/-dirty//g''\'''')'' common/scripts/setlocalversion
-
+      run: |
+        cd kernel_workspace/kernel_platform
+        sed -i 's/ -dirty//g' common/scripts/setlocalversion
+        sed -i 's/ -dirty//g' msm-kernel/scripts/setlocalversion
+        sed -i 's/ -dirty//g' external/dtc/scripts/setlocalversion
+        sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' common/scripts/setlocalversion
         git add -A
-
         git commit -m "Force remove -dirty suffix from kernel version"
-
-        '
     - name: Fallback build kernel
-      run: "cd kernel_workspace\npython3 - <<'PY'\nfrom pathlib import Path\nscript\
-        \ = Path(\"kernel_platform/oplus/build/oplus_build_kernel.sh\")\nsource =\
-        \ script.read_text()\nmarker = \"    build_end_time\"\nif source.count(marker)\
-        \ != 1:\n    raise SystemExit(\"Expected one build_end_time call; inspect\
-        \ vendor build script\")\nsource = source.replace(marker, '    local build_status=${PIPESTATUS[0]}\\\
-        n    if [ \"$build_status\" -ne 0 ]; then\\n        return \"$build_status\"\
-        \\n    fi\\n' + marker, 1)\nscript.write_text(source)\nPY\nLTO=thin SYSTEM_DLKM_RE_SIGN=0\
-        \ BUILD_SYSTEM_DLKM=0 KMI_SYMBOL_LIST_STRICT_MODE=0 ./kernel_platform/oplus/build/oplus_build_kernel.sh\
-        \ waipio gki\n"
+      run: |
+        cd kernel_workspace
+        python3 - <<'PY'
+        from pathlib import Path
+        script = Path("kernel_platform/oplus/build/oplus_build_kernel.sh")
+        source = script.read_text()
+        marker = "    build_end_time"
+        if source.count(marker) != 1:
+            raise SystemExit("Expected one build_end_time call; inspect vendor build script")
+        source = source.replace(marker, '    local build_status=${PIPESTATUS[0]}\n    if [ "$build_status" -ne 0 ]; then\n        return "$build_status"\n    fi\n' + marker, 1)
+        script.write_text(source)
+        PY
+        LTO=thin SYSTEM_DLKM_RE_SIGN=0 BUILD_SYSTEM_DLKM=0 KMI_SYMBOL_LIST_STRICT_MODE=0 ./kernel_platform/oplus/build/oplus_build_kernel.sh waipio gki
     - name: Verify kernel Image
-      run: "image_path=$(find kernel_workspace/kernel_platform -type f -name Image\
-        \ -size +0c -print -quit)\nif [ -z \"$image_path\" ]; then\n  echo \"::error::Kernel\
-        \ build produced no non-empty Image\"\n  exit 1\nfi\necho \"Built Image: $image_path\"\
-        \nfile \"$image_path\"\nsha256sum \"$image_path\"\n"
+      run: |
+        image_path=$(find kernel_workspace/kernel_platform -type f -name Image -size +0c -print -quit)
+        if [ -z "$image_path" ]; then
+          echo "::error::Kernel build produced no non-empty Image"
+          exit 1
+        fi
+        echo "Built Image: $image_path"
+        file "$image_path"
+        sha256sum "$image_path"
     - name: Upload clean OnePlus kernel
       uses: actions/upload-artifact@v4
       with:
